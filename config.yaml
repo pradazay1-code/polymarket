@@ -1,0 +1,54 @@
+# Polymarket bot configuration.
+# Each bot below can be run independently via `python main.py <bot_name>`.
+
+global:
+  # Discount applied below the favorite's current YES price.
+  # 0.30 means "I want a 30% discount" -> bid = market * (1 - 0.30).
+  discount: 0.30
+  # How often the bot wakes up, cancels stale bids, and reposts (seconds).
+  refresh_interval: 900  # 15 minutes
+  # Per-market USDC notional. Start tiny while incubating.
+  bet_size_usdc: 5.0
+  # Hard cap on simultaneously-open notional across all markets for safety.
+  max_open_notional_usdc: 200.0
+  # Don't bid on legs where the favorite is already above this price (no edge in betting against ~certainty).
+  max_favorite_price: 0.92
+  # Don't bid if the favorite is at coin-flip; we want lopsided markets.
+  min_favorite_price: 0.55
+  # Cancel all open orders for the strategy at the start of every cycle.
+  cancel_before_refresh: true
+  # Dry run: log intended orders without sending them.
+  dry_run: true
+
+bots:
+  wta:
+    enabled: true
+    description: "Women's tennis (WTA) — best-of-3, more upsets, more volatility."
+    sport: tennis
+    espn_league: wta
+    polymarket_tag: tennis
+    account: primary
+
+  nba:
+    enabled: false
+    description: "NBA game-winner stink bids on the favorite."
+    sport: basketball
+    espn_league: nba
+    polymarket_tag: nba
+    account: primary
+
+  cricket:
+    enabled: false
+    description: "Cricket match-winner stink bids."
+    sport: cricket
+    espn_league: null
+    polymarket_tag: cricket
+    account: primary
+
+  mlb:
+    enabled: false
+    description: "MLB moneyline stink bids."
+    sport: baseball
+    espn_league: mlb
+    polymarket_tag: mlb
+    account: primary
