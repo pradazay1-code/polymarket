@@ -91,11 +91,13 @@ def fetch_markets(
         log.warning("gamma fetch failed tag=%s err=%s", tag, e)
         return []
 
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=ending_within_hours)
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(hours=ending_within_hours)
     out: list[Market] = []
     for row in rows:
         end_dt = _parse_dt(row.get("endDate"))
-        if end_dt and end_dt > cutoff:
+        # Skip markets that already ended or end past our window.
+        if end_dt and (end_dt < now or end_dt > cutoff):
             continue
         token_ids = _parse_json_list(row.get("clobTokenIds"))
         outcomes = _parse_json_list(row.get("outcomes"))

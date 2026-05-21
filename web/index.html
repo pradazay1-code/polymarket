@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Polymarket Bot Dashboard</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #141821;
+    --panel-2: #1a1f2b;
+    --text: #e6e9ef;
+    --dim: #8b93a7;
+    --accent: #4cc9f0;
+    --good: #7bd389;
+    --bad: #f06a6a;
+    --warn: #f0b86a;
+    --border: #232936;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: 0.5px; }
+  header .pill { background: var(--panel-2); padding: 4px 10px; border-radius: 999px; font-size: 12px; color: var(--dim); }
+  main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card h2 { margin: 0 0 10px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); font-weight: 600; }
+  .stat { font-size: 24px; font-weight: 600; }
+  .stat small { font-size: 12px; color: var(--dim); font-weight: 400; margin-left: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  tr:last-child td { border-bottom: 0; }
+  .row { display: flex; gap: 16px; align-items: center; }
+  .tabs { display: flex; gap: 4px; margin: 24px 0 12px 0; }
+  .tab { padding: 8px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; color: var(--dim); font-size: 13px; }
+  .tab.active { background: var(--panel-2); color: var(--text); border-color: var(--accent); }
+  .btn { padding: 6px 12px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); color: #0b0d12; border-color: var(--accent); font-weight: 600; }
+  .btn.danger { color: var(--bad); border-color: var(--bad); }
+  .good { color: var(--good); }
+  .bad { color: var(--bad); }
+  .warn { color: var(--warn); }
+  .dim { color: var(--dim); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; background: var(--panel-2); color: var(--dim); }
+  .badge.on { background: rgba(123,211,137,0.15); color: var(--good); }
+  .badge.off { background: rgba(139,147,167,0.15); color: var(--dim); }
+  .badge.dry { background: rgba(240,184,106,0.15); color: var(--warn); }
+  .badge.live { background: rgba(76,201,240,0.15); color: var(--accent); }
+  .badge.running { background: rgba(123,211,137,0.15); color: var(--good); }
+  pre { background: var(--bg); padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 11px; color: var(--dim); }
+  .muted-block { padding: 18px; text-align: center; color: var(--dim); font-style: italic; }
+  .controls { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .market-q { color: var(--text); font-weight: 500; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>POLYMARKET • AUTOMATION</h1>
+  <div class="row">
+    <span class="pill" id="mode-pill">…</span>
+    <span class="pill" id="updated-pill">…</span>
+  </div>
+</header>
+
+<main>
+  <section class="grid" id="summary"></section>
+
+  <div class="tabs" id="tabs"></div>
+  <div id="content"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt$ = (n) => `$${(Number(n)||0).toFixed(2)}`;
+const fmtPct = (n) => `${(Number(n)*100).toFixed(0)}%`;
+const fmtNum = (n, d=2) => (Number(n)||0).toFixed(d);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+let STATE = { bots: [], globals: {}, accounts: [], activeTab: null, account: {} };
+
+async function api(path, init) {
+  const r = await fetch(path, init);
+  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  return r.json();
+}
+
+async function loadAll() {
+  try {
+    const data = await api("/api/bots");
+    STATE.bots = data.bots;
+    STATE.globals = data.globals;
+    STATE.accounts = data.accounts;
+    if (!STATE.activeTab && STATE.bots.length) STATE.activeTab = STATE.bots[0].name;
+    if (STATE.accounts.length) {
+      try { STATE.account = await api(`/api/account/${STATE.accounts[0]}`); } catch (e) { STATE.account = { error: e.message }; }
+    }
+    render();
+  } catch (e) {
+    console.error(e);
+  }
+  $("updated-pill").textContent = `updated ${new Date().toLocaleTimeString()}`;
+}
+
+function render() {
+  renderSummary();
+  renderTabs();
+  renderActiveTab();
+}
+
+function renderSummary() {
+  const g = STATE.globals;
+  const a = STATE.account || {};
+  const totalIntents = STATE.bots.reduce((s, b) => s + (b.latest?.planned || 0), 0);
+  const totalPosts = STATE.bots.reduce((s, b) => s + (b.latest?.posted || 0), 0);
+  $("mode-pill").innerHTML = g.dry_run ? '<span class="badge dry">DRY RUN</span>' : '<span class="badge live">LIVE</span>';
+
+  $("summary").innerHTML = `
+    <div class="card">
+      <h2>USDC Balance</h2>
+      <div class="stat">${fmt$(a.balance)} <small>allowance ${fmt$(a.allowance)}</small></div>
+      <div class="dim mono" style="margin-top:6px; font-size:11px;">${esc(a.funder || "—")}</div>
+    </div>
+    <div class="card">
+      <h2>Open Orders</h2>
+      <div class="stat">${a.open_orders ? a.open_orders.length : 0}</div>
+    </div>
+    <div class="card">
+      <h2>Positions</h2>
+      <div class="stat">${a.positions ? a.positions.length : 0}</div>
+    </div>
+    <div class="card">
+      <h2>This Cycle</h2>
+      <div class="stat">${totalIntents} <small>planned · ${totalPosts} posted</small></div>
+    </div>
+    <div class="card">
+      <h2>Settings</h2>
+      <div>discount <b>${fmtPct(g.discount)}</b> · refresh <b>${g.refresh_interval}s</b></div>
+      <div>bet size <b>${fmt$(g.bet_size_usdc)}</b> · cap <b>${fmt$(g.max_open_notional_usdc)}</b></div>
+      <div>favorite window <b>${g.min_favorite_price}–${g.max_favorite_price}</b></div>
+    </div>
+  `;
+}
+
+function renderTabs() {
+  const tabs = [
+    ...STATE.bots.map(b => ({ key: b.name, label: b.name.toUpperCase(), kind: "bot", bot: b })),
+    { key: "_orders", label: "OPEN ORDERS", kind: "orders" },
+    { key: "_positions", label: "POSITIONS", kind: "positions" },
+  ];
+  $("tabs").innerHTML = tabs.map(t => {
+    const active = STATE.activeTab === t.key ? "active" : "";
+    const running = t.kind === "bot" && t.bot.running ? '<span class="badge running" style="margin-left:6px;">●</span>' : "";
+    const off = t.kind === "bot" && !t.bot.enabled ? '<span class="badge off" style="margin-left:6px;">off</span>' : "";
+    return `<div class="tab ${active}" onclick="setTab('${t.key}')">${t.label}${running}${off}</div>`;
+  }).join("");
+}
+
+function setTab(key) { STATE.activeTab = key; render(); }
+
+function renderActiveTab() {
+  const key = STATE.activeTab;
+  if (key === "_orders") return renderOrders();
+  if (key === "_positions") return renderPositions();
+  return renderBot(key);
+}
+
+function renderBot(name) {
+  const bot = STATE.bots.find(b => b.name === name);
+  if (!bot) { $("content").innerHTML = `<div class="muted-block">no bot selected</div>`; return; }
+  const latest = bot.latest;
+  const controls = `
+    <div class="controls">
+      <button class="btn primary" onclick="tick('${name}')">▶ Run one cycle</button>
+      ${bot.running
+        ? `<button class="btn danger" onclick="stopBot('${name}')">■ Stop loop</button>`
+        : `<button class="btn" onclick="startBot('${name}')">↻ Start loop</button>`}
+      <span class="badge ${bot.enabled ? 'on' : 'off'}">${bot.enabled ? 'enabled' : 'disabled'}</span>
+      <span class="badge">${esc(bot.tag)}</span>
+      <span class="badge">acct: ${esc(bot.account)}</span>
+      ${bot.running ? '<span class="badge running">loop running</span>' : ''}
+    </div>
+    <div class="dim" style="margin-bottom:14px;">${esc(bot.description || "")}</div>
+  `;
+  if (!latest) {
+    $("content").innerHTML = controls + `<div class="muted-block">No cycle has been run yet. Click "Run one cycle" to populate.</div>`;
+    return;
+  }
+  const intentsHtml = latest.intents && latest.intents.length
+    ? `<table>
+        <thead><tr><th>Market</th><th>Outcome</th><th>Fav px</th><th>Bid</th><th>Shares</th><th>Notional</th><th>Ends</th></tr></thead>
+        <tbody>
+          ${latest.intents.map(i => `
+            <tr>
+              <td class="market-q">${esc(i.market_question)}</td>
+              <td>${esc(i.outcome)}</td>
+              <td>${fmtNum(i.favorite_price, 2)}</td>
+              <td class="good">${fmtNum(i.bid_price, 4)}</td>
+              <td>${fmtNum(i.size_shares)}</td>
+              <td>${fmt$(i.notional)}</td>
+              <td class="dim">${esc((i.end_date||"").slice(0,16))}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>`
+    : `<div class="muted-block">No picks this cycle (all markets skipped or no liquidity).</div>`;
+  const skippedHtml = latest.skipped && latest.skipped.length
+    ? `<details><summary class="dim" style="cursor:pointer; margin-top:10px;">${latest.skipped.length} skipped</summary>
+        <table style="margin-top:8px;"><thead><tr><th>Market</th><th>Why</th></tr></thead><tbody>
+          ${latest.skipped.map(s => `<tr><td class="dim">${esc(s.slug)}</td><td class="dim">${esc(s.reason)}</td></tr>`).join("")}
+        </tbody></table></details>`
+    : "";
+  const historyHtml = bot.latest && bot.latest.error
+    ? `<div class="card bad" style="margin-top:12px;">Last error: <pre>${esc(latest.error)}</pre></div>`
+    : "";
+  const stateBox = `
+    <div class="grid" style="grid-template-columns:repeat(4,1fr); margin-bottom:14px;">
+      <div class="card"><h2>Last Cycle</h2><div class="stat" style="font-size:18px;">${esc(latest.ts)}</div></div>
+      <div class="card"><h2>Inspected</h2><div class="stat">${latest.inspected}</div></div>
+      <div class="card"><h2>Planned</h2><div class="stat">${latest.planned}</div></div>
+      <div class="card"><h2>Posted</h2><div class="stat ${latest.dry_run ? 'warn' : 'good'}">${latest.posted}${latest.dry_run ? ' <small>dry</small>' : ''}</div></div>
+    </div>`;
+  $("content").innerHTML = controls + stateBox + `<div class="card"><h2>Picks this cycle</h2>${intentsHtml}${skippedHtml}</div>` + historyHtml;
+}
+
+function renderOrders() {
+  const orders = STATE.account?.open_orders || [];
+  if (!orders.length) { $("content").innerHTML = `<div class="muted-block">No open orders.</div>`; return; }
+  $("content").innerHTML = `
+    <div class="card">
+      <h2>Open Orders (${orders.length})</h2>
+      <table>
+        <thead><tr><th>Side</th><th>Asset</th><th>Price</th><th>Size</th><th>Filled</th><th>Status</th></tr></thead>
+        <tbody>
+          ${orders.map(o => `
+            <tr>
+              <td>${esc(o.side)}</td>
+              <td class="mono dim">${esc(String(o.asset_id || o.market || "").slice(0,18))}…</td>
+              <td>${fmtNum(o.price, 4)}</td>
+              <td>${fmtNum(o.original_size || o.size)}</td>
+              <td>${fmtNum(o.size_matched)}</td>
+              <td><span class="badge">${esc(o.status || "")}</span></td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function renderPositions() {
+  const positions = STATE.account?.positions || [];
+  if (!positions.length) { $("content").innerHTML = `<div class="muted-block">No positions.</div>`; return; }
+  $("content").innerHTML = `
+    <div class="card">
+      <h2>Positions (${positions.length})</h2>
+      <table>
+        <thead><tr><th>Market</th><th>Outcome</th><th>Size</th><th>Avg</th><th>Current</th><th>PnL</th></tr></thead>
+        <tbody>
+          ${positions.map(p => {
+            const pnl = Number(p.cashPnl || 0);
+            return `<tr>
+              <td class="market-q">${esc(p.title || p.slug || "")}</td>
+              <td>${esc(p.outcome || "")}</td>
+              <td>${fmtNum(p.size)}</td>
+              <td>${fmtNum(p.avgPrice, 3)}</td>
+              <td>${fmtNum(p.curPrice, 3)}</td>
+              <td class="${pnl >= 0 ? 'good' : 'bad'}">${fmt$(pnl)}</td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+async function tick(name) {
+  try { await api(`/api/bots/${name}/tick`, { method: "POST" }); await loadAll(); }
+  catch (e) { alert(e.message); }
+}
+async function startBot(name) {
+  try { await api(`/api/bots/${name}/run`, { method: "POST" }); setTimeout(loadAll, 500); }
+  catch (e) { alert(e.message); }
+}
+async function stopBot(name) {
+  try { await api(`/api/bots/${name}/stop`, { method: "POST" }); setTimeout(loadAll, 500); }
+  catch (e) { alert(e.message); }
+}
+
+loadAll();
+setInterval(loadAll, 15000);
+</script>
+</body>
+</html>

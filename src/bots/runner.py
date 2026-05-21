@@ -1,15 +1,16 @@
-"""Bot runner: one tick = fetch markets, plan, execute, sleep."""
+"""Bot runner: one tick = fetch markets, plan, execute, persist, sleep."""
 from __future__ import annotations
 
 import logging
 import signal
 import time
+import threading
 
 from ..client import PolymarketClient
 from ..config import AppConfig, BotConfig
 from ..markets import fetch_markets
+from ..state import CycleSnapshot, now_iso, write_snapshot
 from ..strategies.stink_bid import StinkBidStrategy
-from ..tracker import Tracker
 
 log = logging.getLogger(__name__)
 
@@ -26,40 +27,51 @@ class BotRunner:
             )
         self.client = PolymarketClient(account=account, host=app.clob_host, chain_id=app.chain_id)
         self.strategy = StinkBidStrategy(self.client, app.globals, label=bot.name)
-        self.tracker = Tracker(self.client, label=bot.name)
-        self._stop = False
-        signal.signal(signal.SIGINT, self._shutdown)
-        signal.signal(signal.SIGTERM, self._shutdown)
+        self._stop = threading.Event()
 
     def _shutdown(self, *_):
         log.info("[%s] shutdown requested", self.bot.name)
-        self._stop = True
+        self._stop.set()
 
-    def tick(self) -> None:
-        log.info("[%s] --- cycle start ---", self.bot.name)
-        markets = fetch_markets(self.app.gamma_host, self.bot.polymarket_tag)
-        if not markets:
-            log.info("[%s] no markets in scope this cycle", self.bot.name)
-            return
-        intents = self.strategy.plan(markets)
-        log.info("[%s] planned %d / %d markets", self.bot.name, len(intents), len(markets))
-        self.strategy.execute(intents)
-        self.tracker.snapshot()
+    def tick(self) -> CycleSnapshot:
+        snap = CycleSnapshot(bot=self.bot.name, ts=now_iso(), dry_run=self.app.globals.dry_run,
+                             inspected=0, planned=0, posted=0)
+        try:
+            log.info("[%s] --- cycle start ---", self.bot.name)
+            markets = fetch_markets(self.app.gamma_host, self.bot.polymarket_tag)
+            snap.inspected = len(markets)
+            if not markets:
+                log.info("[%s] no markets in scope", self.bot.name)
+            else:
+                result = self.strategy.plan(markets)
+                snap.planned = len(result.intents)
+                snap.intents = [i.to_dict() for i in result.intents]
+                snap.skipped = result.skipped
+                log.info("[%s] planned %d / %d markets", self.bot.name, snap.planned, snap.inspected)
+                posts = self.strategy.execute(result.intents)
+                snap.posts = posts
+                snap.posted = len(posts)
+            ba = self.client.balance_allowance()
+            snap.balance = ba["balance"]
+            snap.allowance = ba["allowance"]
+        except Exception as e:  # noqa: BLE001
+            log.exception("[%s] tick failed", self.bot.name)
+            snap.error = str(e)
+        finally:
+            write_snapshot(snap)
+        return snap
 
-    def run_once(self) -> None:
-        self.tick()
+    def run_once(self) -> CycleSnapshot:
+        return self.tick()
 
     def run_forever(self) -> None:
+        # Only install signal handlers when we own the main thread.
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, self._shutdown)
+            signal.signal(signal.SIGTERM, self._shutdown)
         interval = self.app.globals.refresh_interval
-        log.info("[%s] starting loop, every %ds (dry_run=%s)", self.bot.name, interval, self.app.globals.dry_run)
-        while not self._stop:
-            try:
-                self.tick()
-            except Exception as e:  # noqa: BLE001
-                log.exception("[%s] tick failed: %s", self.bot.name, e)
-            # Sleep in small slices so SIGINT is responsive.
-            slept = 0
-            while slept < interval and not self._stop:
-                time.sleep(min(2, interval - slept))
-                slept += 2
+        log.info("[%s] starting loop every %ds (dry_run=%s)", self.bot.name, interval, self.app.globals.dry_run)
+        while not self._stop.is_set():
+            self.tick()
+            self._stop.wait(timeout=interval)
         log.info("[%s] stopped", self.bot.name)

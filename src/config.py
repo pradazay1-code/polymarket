@@ -17,6 +17,10 @@ class Account:
     name: str
     private_key: str
     funder_address: str
+    # 0 = browser EOA (MetaMask / hardware) — needs USDC approvals on-chain.
+    # 1 = polymarket.com email/Magic wallet — gasless, allowances auto-managed.
+    # 2 = legacy browser-proxy contract (rare).
+    signature_type: int = 1
 
 
 @dataclass
@@ -61,7 +65,13 @@ def _load_accounts() -> dict[str, Account]:
         pk = os.getenv(f"PRIVATE_KEY{suffix}", "").strip()
         funder = os.getenv(f"FUNDER_ADDRESS{suffix}", "").strip()
         if pk and funder:
-            accounts[name] = Account(name=name, private_key=pk, funder_address=funder)
+            sig_raw = os.getenv(f"SIGNATURE_TYPE{suffix}", "1").strip() or "1"
+            accounts[name] = Account(
+                name=name,
+                private_key=pk,
+                funder_address=funder,
+                signature_type=int(sig_raw),
+            )
     return accounts
 
 
