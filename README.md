@@ -109,6 +109,41 @@ Add an entry under `bots:` in `config.yaml`. As long as Polymarket has a
 matching tag (`tennis`, `nba`, `cricket`, `mlb`, `nhl`, `soccer`, `ufc`, `pga`,
 etc.), the same stink-bid logic applies.
 
+## Analytics
+
+Three commands sit on top of the bot to answer "does this strategy actually
+have edge before I risk money?"
+
+```bash
+# Replay 30 days of resolved markets through the strategy. Results cached in
+# state/backtest_<tag>_<days>d.json — pass --refresh to refetch.
+python main.py backtest wta --days 30 --top 10
+
+# Plan the next live cycle, then rank intents by expected value using the
+# historical hit rates from the backtest. Needs Polymarket credentials.
+python main.py edge wta
+
+# Aggregate PnL across all bots: live posts, dry-run posts, open positions,
+# realized + unrealized. --no-live skips the position fetch.
+python main.py pnl
+python main.py pnl wta --no-live
+```
+
+The backtest works **without Polymarket credentials** — only public Gamma +
+CLOB price-history endpoints — so you can evaluate edge before signing up.
+
+### Honest caveats baked into the output
+
+- Backtest fills assume our limit is at the front of the queue. In reality,
+  many "filled" prints would have been someone else's order first. Real
+  fill counts will be a fraction of simulated.
+- Only markets that resolved cleanly are scored — survivorship bias.
+- No slippage, no fees, no partial fills modelled.
+- EV from edge scoring uses bucketed historical rates; bucket sizes are
+  printed so you can see when sample size is too small to trust.
+- Past performance is not predictive. Use these numbers to **rule strategies
+  out**, not to size up.
+
 ## Known limits / next steps
 
 - The bot does not auto-redeem winning positions — claim them on
@@ -116,7 +151,8 @@ etc.), the same stink-bid logic applies.
   `redeemPositions` call).
 - Market discovery polls Gamma every cycle; for sub-minute reactions, swap to
   the CLOB WSS book stream.
-- No automatic backtest harness yet — strategy parameter tuning is manual.
+- Backtester models GTC fills naively (next-cycle window); add a queue-
+  position model for tighter realism.
 
 ## Disclaimer
 
