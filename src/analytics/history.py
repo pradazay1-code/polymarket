@@ -115,29 +115,48 @@ def fetch_price_history(
     clob_host: str,
     token_id: str,
     *,
-    interval: str = "1h",
+    interval: str | None = None,
     start_ts: int | None = None,
     end_ts: int | None = None,
+    fidelity: int = 60,
 ) -> list[PricePoint]:
-    """Time series of token price (0..1). Returns [] on error."""
+    """Time series of token price (0..1). Returns [] on error.
+
+    The CLOB endpoint takes EITHER:
+      - interval (one of: 1m, 1h, 6h, 1d, 1w, max) — rolling window from "now"
+      - startTs + endTs (unix seconds) — explicit window
+
+    For RESOLVED markets you almost always want startTs/endTs anchored to the
+    market's lifetime; the interval form returns nothing because the market
+    isn't trading anymore.
+
+    `fidelity` is the resolution in minutes (default 60 = hourly bars).
+    """
     url = f"{clob_host.rstrip('/')}/prices-history"
-    params: dict[str, Any] = {"market": token_id, "interval": interval}
-    if start_ts:
+    params: dict[str, Any] = {"market": token_id, "fidelity": fidelity}
+    if start_ts and end_ts:
         params["startTs"] = start_ts
-    if end_ts:
         params["endTs"] = end_ts
+    else:
+        params["interval"] = interval or "max"
     try:
         r = requests.get(url, params=params, timeout=20)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            log.warning("prices-history %s -> %d %s",
+                        token_id[:12], r.status_code, r.text[:200])
+            return []
         data = r.json() or {}
     except Exception as e:  # noqa: BLE001
-        log.debug("prices-history failed token=%s err=%s", token_id[:12], e)
+        log.warning("prices-history failed token=%s err=%s", token_id[:12], e)
         return []
-    rows = data.get("history") or []
+    rows = data.get("history") or data.get("prices") or []
     out: list[PricePoint] = []
     for row in rows:
         try:
             out.append(PricePoint(ts=int(row["t"]), price=float(row["p"])))
         except (KeyError, TypeError, ValueError):
             continue
+    if not out:
+        log.debug("prices-history empty token=%s params=%s body=%s",
+                  token_id[:12], params, str(data)[:200])
     return out

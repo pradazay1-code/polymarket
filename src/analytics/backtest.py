@@ -223,8 +223,21 @@ def run_backtest(
     all_trades: list[BacktestTrade] = []
     markets_with_history = 0
     for m in markets:
-        # Fetch history for outcome-0 token; price = P(outcomes[0])
-        history = fetch_price_history(clob_host, m.token_ids[0], interval="1h")
+        # Anchor the price-history fetch to the market's actual lifetime.
+        # Default window: 14 days before close through close+1d, hourly bars.
+        if m.end_date:
+            end_ts = int(m.end_date.timestamp()) + 86400
+            start_ts = end_ts - 15 * 86400
+        else:
+            end_ts = start_ts = None
+        history = fetch_price_history(
+            clob_host, m.token_ids[0],
+            start_ts=start_ts, end_ts=end_ts, fidelity=60,
+        )
+        if not history:
+            # Fall back to interval=max for markets whose end_date was odd.
+            history = fetch_price_history(clob_host, m.token_ids[0],
+                                          interval="max", fidelity=60)
         if not history:
             continue
         markets_with_history += 1
