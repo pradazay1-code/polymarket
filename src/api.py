@@ -8,9 +8,14 @@ Endpoints:
     POST /api/bots/{name}/tick  -> run one cycle synchronously
     POST /api/bots/{name}/run   -> start the bot loop in a background thread
     POST /api/bots/{name}/stop  -> stop the running loop
+    POST /api/settings          -> update mutable globals (dry_run, bet_size_usdc)
+    POST /api/analytics/backtest/{name}  -> kick off backtest (async)
+    GET  /api/analytics/backtest/{name}  -> current backtest result + job status
+    GET  /api/analytics/pnl              -> aggregated PnL across bots
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from pathlib import Path
@@ -21,6 +26,8 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import config as cfg_mod
 from . import state
+from .analytics import backtest as backtest_mod
+from .analytics import pnl as pnl_mod
 from .bots.runner import BotRunner
 from .client import PolymarketClient
 
@@ -30,6 +37,8 @@ _app_cfg: cfg_mod.AppConfig | None = None
 _runners: dict[str, BotRunner] = {}
 _threads: dict[str, threading.Thread] = {}
 _clients: dict[str, PolymarketClient] = {}
+_backtest_jobs: dict[str, dict[str, Any]] = {}  # bot_name -> {"thread", "started_at", "days", "error"}
+_BACKTEST_CACHE_DIR = Path("state")
 
 
 def _cfg() -> cfg_mod.AppConfig:
@@ -91,6 +100,7 @@ def list_bots() -> dict[str, Any]:
             "sport": b.sport,
             "tag": b.polymarket_tag,
             "account": b.account,
+            "strategy": b.strategy,
             "running": name in _threads and _threads[name].is_alive(),
             "latest": latest,
         })
@@ -173,6 +183,143 @@ def bot_stop(bot_name: str) -> dict[str, Any]:
         return {"status": "not running"}
     runner._stop.set()
     return {"status": "stopping"}
+
+
+# --- settings ---------------------------------------------------------------
+
+
+@app.post("/api/settings")
+def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    """Mutate at-runtime globals. Persisted to config.yaml requires editing
+    the file; this only changes the in-process AppConfig until restart."""
+    cfg = _cfg()
+    changed = {}
+    if "dry_run" in payload:
+        cfg.globals.dry_run = bool(payload["dry_run"])
+        changed["dry_run"] = cfg.globals.dry_run
+    if "bet_size_usdc" in payload:
+        try:
+            v = float(payload["bet_size_usdc"])
+            if 0 < v <= 1000:
+                cfg.globals.bet_size_usdc = v
+                changed["bet_size_usdc"] = v
+        except (TypeError, ValueError):
+            pass
+    if "max_open_notional_usdc" in payload:
+        try:
+            v = float(payload["max_open_notional_usdc"])
+            if 0 < v <= 100000:
+                cfg.globals.max_open_notional_usdc = v
+                changed["max_open_notional_usdc"] = v
+        except (TypeError, ValueError):
+            pass
+    return {"updated": changed, "note": "in-memory only; restart reloads config.yaml"}
+
+
+# --- analytics --------------------------------------------------------------
+
+
+def _backtest_cache_path(tag: str, days: int) -> Path:
+    _BACKTEST_CACHE_DIR.mkdir(exist_ok=True)
+    return _BACKTEST_CACHE_DIR / f"backtest_{tag}_{days}d.json"
+
+
+def _run_backtest_async(bot_name: str, tag: str, days: int) -> None:
+    job = _backtest_jobs.get(bot_name)
+    if job is None:
+        return
+    cfg = _cfg()
+    try:
+        stats = backtest_mod.run_backtest(
+            cfg.globals,
+            gamma_host=cfg.gamma_host,
+            clob_host=cfg.clob_host,
+            tag=tag,
+            days=days,
+        )
+        payload = backtest_mod.stats_to_dict(stats)
+        payload["trades"] = [t.__dict__ for t in stats.trades]
+        _backtest_cache_path(tag, days).write_text(json.dumps(payload, indent=2, default=str))
+        job["status"] = "done"
+    except Exception as e:  # noqa: BLE001
+        log.exception("backtest failed bot=%s", bot_name)
+        job["status"] = "error"
+        job["error"] = str(e)
+
+
+@app.post("/api/analytics/backtest/{bot_name}")
+def start_backtest(bot_name: str, days: int = 30) -> dict[str, Any]:
+    cfg = _cfg()
+    bot = cfg.bots.get(bot_name)
+    if not bot:
+        raise HTTPException(404, f"unknown bot '{bot_name}'")
+    existing = _backtest_jobs.get(bot_name)
+    if existing and existing.get("thread") and existing["thread"].is_alive():
+        return {"status": "already running", "started_at": existing.get("started_at"), "days": existing.get("days")}
+    job: dict[str, Any] = {
+        "status": "running",
+        "started_at": state.now_iso(),
+        "days": days,
+        "tag": bot.polymarket_tag,
+        "error": None,
+    }
+    _backtest_jobs[bot_name] = job
+    t = threading.Thread(
+        target=_run_backtest_async,
+        args=(bot_name, bot.polymarket_tag, days),
+        name=f"backtest-{bot_name}",
+        daemon=True,
+    )
+    job["thread"] = t
+    t.start()
+    return {"status": "started", "started_at": job["started_at"], "days": days}
+
+
+@app.get("/api/analytics/backtest/{bot_name}")
+def get_backtest(bot_name: str, days: int = 30) -> dict[str, Any]:
+    cfg = _cfg()
+    bot = cfg.bots.get(bot_name)
+    if not bot:
+        raise HTTPException(404, f"unknown bot '{bot_name}'")
+    job = _backtest_jobs.get(bot_name)
+    job_status = None
+    if job:
+        thread = job.get("thread")
+        alive = thread is not None and thread.is_alive()
+        job_status = {
+            "status": "running" if alive else (job.get("status") or "idle"),
+            "started_at": job.get("started_at"),
+            "days": job.get("days"),
+            "error": job.get("error"),
+        }
+    cache = _backtest_cache_path(bot.polymarket_tag, days)
+    result: dict[str, Any] | None = None
+    if cache.exists():
+        try:
+            result = json.loads(cache.read_text())
+        except json.JSONDecodeError:
+            result = None
+    return {"bot": bot_name, "tag": bot.polymarket_tag, "days": days, "job": job_status, "result": result}
+
+
+@app.get("/api/analytics/pnl")
+def get_pnl() -> dict[str, Any]:
+    cfg = _cfg()
+    account_positions: dict[str, list] = {}
+    rows = []
+    for name, b in cfg.bots.items():
+        positions = None
+        if b.account in cfg.accounts:
+            if b.account not in account_positions:
+                try:
+                    client = _get_client(b.account)
+                    account_positions[b.account] = client.positions()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("position fetch failed for %s: %s", b.account, e)
+                    account_positions[b.account] = []
+            positions = account_positions[b.account]
+        rows.append(pnl_mod.compute_bot_pnl(name, positions=positions).to_dict())
+    return {"bots": rows}
 
 
 @app.exception_handler(Exception)

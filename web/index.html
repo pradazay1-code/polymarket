@@ -148,8 +148,11 @@ function renderSummary() {
 function renderTabs() {
   const tabs = [
     ...STATE.bots.map(b => ({ key: b.name, label: b.name.toUpperCase(), kind: "bot", bot: b })),
+    { key: "_analytics", label: "ANALYTICS", kind: "analytics" },
+    { key: "_pnl", label: "PNL", kind: "pnl" },
     { key: "_orders", label: "OPEN ORDERS", kind: "orders" },
     { key: "_positions", label: "POSITIONS", kind: "positions" },
+    { key: "_settings", label: "SETTINGS", kind: "settings" },
   ];
   $("tabs").innerHTML = tabs.map(t => {
     const active = STATE.activeTab === t.key ? "active" : "";
@@ -165,6 +168,9 @@ function renderActiveTab() {
   const key = STATE.activeTab;
   if (key === "_orders") return renderOrders();
   if (key === "_positions") return renderPositions();
+  if (key === "_analytics") return renderAnalytics();
+  if (key === "_pnl") return renderPnL();
+  if (key === "_settings") return renderSettings();
   return renderBot(key);
 }
 
@@ -179,6 +185,7 @@ function renderBot(name) {
         ? `<button class="btn danger" onclick="stopBot('${name}')">■ Stop loop</button>`
         : `<button class="btn" onclick="startBot('${name}')">↻ Start loop</button>`}
       <span class="badge ${bot.enabled ? 'on' : 'off'}">${bot.enabled ? 'enabled' : 'disabled'}</span>
+      <span class="badge">strat: ${esc(bot.strategy || 'stink_bid')}</span>
       <span class="badge">${esc(bot.tag)}</span>
       <span class="badge">acct: ${esc(bot.account)}</span>
       ${bot.running ? '<span class="badge running">loop running</span>' : ''}
@@ -285,6 +292,218 @@ async function startBot(name) {
 async function stopBot(name) {
   try { await api(`/api/bots/${name}/stop`, { method: "POST" }); setTimeout(loadAll, 500); }
   catch (e) { alert(e.message); }
+}
+
+// ---------- Analytics: backtest ----------
+
+let ANALYTICS = { selected: null, days: 30, polling: false };
+
+function renderAnalytics() {
+  if (!ANALYTICS.selected && STATE.bots.length) ANALYTICS.selected = STATE.bots[0].name;
+  const botOpts = STATE.bots.map(b =>
+    `<option value="${esc(b.name)}" ${b.name === ANALYTICS.selected ? 'selected' : ''}>${esc(b.name)} (${esc(b.tag)})</option>`
+  ).join("");
+  $("content").innerHTML = `
+    <div class="card">
+      <h2>Backtest</h2>
+      <div class="dim" style="margin-bottom:10px;">
+        Replay resolved markets through the bot's strategy. Public Polymarket endpoints — no account needed.
+        Optimistic (queue-front fills). Use to <i>rule out</i> bad strategies before risking money.
+      </div>
+      <div class="controls">
+        <label>Bot: <select id="bt-bot" onchange="ANALYTICS.selected=this.value; refreshBacktest()">${botOpts}</select></label>
+        <label>Days: <input id="bt-days" type="number" min="3" max="180" value="${ANALYTICS.days}" style="width:64px;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;" onchange="ANALYTICS.days=Number(this.value)||30"/></label>
+        <button class="btn primary" onclick="runBacktest()">▶ Run backtest</button>
+        <button class="btn" onclick="refreshBacktest()">↻ Refresh</button>
+      </div>
+      <div id="bt-body"><div class="muted-block">Click "Run backtest" or "Refresh" to load.</div></div>
+    </div>
+  `;
+  refreshBacktest();
+}
+
+async function runBacktest() {
+  if (!ANALYTICS.selected) return;
+  try {
+    await api(`/api/analytics/backtest/${ANALYTICS.selected}?days=${ANALYTICS.days}`, { method: "POST" });
+    pollBacktest();
+  } catch (e) { alert(e.message); }
+}
+
+async function refreshBacktest() {
+  if (!ANALYTICS.selected) return;
+  try {
+    const r = await api(`/api/analytics/backtest/${ANALYTICS.selected}?days=${ANALYTICS.days}`);
+    renderBacktestBody(r);
+    if (r.job && r.job.status === "running" && !ANALYTICS.polling) pollBacktest();
+  } catch (e) { document.getElementById("bt-body").innerHTML = `<div class="bad">${esc(e.message)}</div>`; }
+}
+
+async function pollBacktest() {
+  if (ANALYTICS.polling) return;
+  ANALYTICS.polling = true;
+  while (true) {
+    await new Promise(r => setTimeout(r, 3000));
+    let r;
+    try { r = await api(`/api/analytics/backtest/${ANALYTICS.selected}?days=${ANALYTICS.days}`); }
+    catch (e) { break; }
+    renderBacktestBody(r);
+    if (!r.job || r.job.status !== "running") break;
+  }
+  ANALYTICS.polling = false;
+}
+
+function renderBacktestBody(r) {
+  const el = document.getElementById("bt-body");
+  if (!el) return;
+  const j = r.job, res = r.result;
+  let head = "";
+  if (j) {
+    if (j.status === "running") {
+      head = `<div class="warn">⏳ Running — started ${esc(j.started_at)} (~1–3 min for ${j.days || ANALYTICS.days} days of data)…</div>`;
+    } else if (j.status === "error") {
+      head = `<div class="bad">Error: ${esc(j.error || "(no message)")}</div>`;
+    } else if (j.status === "done") {
+      head = `<div class="good">✓ Done — finished. Refresh page or click ↻ to view.</div>`;
+    }
+  }
+  if (!res) {
+    el.innerHTML = head || `<div class="muted-block">No cached backtest yet. Click "Run backtest".</div>`;
+    return;
+  }
+  const roi = res.total_notional_usdc ? (res.total_pnl_usdc / res.total_notional_usdc * 100) : 0;
+  const goodBad = (n) => n >= 0 ? "good" : "bad";
+  el.innerHTML = head + `
+    <div class="grid" style="grid-template-columns:repeat(4,1fr); margin-bottom:14px;">
+      <div class="card"><h2>Markets considered</h2><div class="stat">${res.markets_considered}</div></div>
+      <div class="card"><h2>With price data</h2><div class="stat">${res.markets_with_history}</div></div>
+      <div class="card"><h2>Attempts</h2><div class="stat">${res.attempts}</div></div>
+      <div class="card"><h2>Fills</h2><div class="stat">${res.fills} <small>${fmtPct(res.fill_rate)}</small></div></div>
+      <div class="card"><h2>Wins / Losses</h2><div class="stat">${res.wins} / ${res.losses}</div></div>
+      <div class="card"><h2>Win rate | fill</h2><div class="stat">${fmtPct(res.win_rate_given_fill)}</div></div>
+      <div class="card"><h2>Total PnL</h2><div class="stat ${goodBad(res.total_pnl_usdc)}">${fmt$(res.total_pnl_usdc)}</div></div>
+      <div class="card"><h2>ROI</h2><div class="stat ${goodBad(roi)}">${roi.toFixed(1)}%</div></div>
+    </div>
+    <div class="card">
+      <h2>Caveats (read these)</h2>
+      <div class="dim" style="font-size:12px;line-height:1.6;">
+        • Fills assume our bid sits at the front of the queue — real-world fills will be a fraction.<br>
+        • Survivorship bias: only cleanly-resolved markets are scored.<br>
+        • No slippage, no Polymarket fees, no partial fills modeled.<br>
+        • Past performance does not predict future. Use these numbers to rule strategies <i>out</i>, not to size up.
+      </div>
+    </div>
+  `;
+}
+
+// ---------- PnL ----------
+
+async function renderPnL() {
+  $("content").innerHTML = `<div class="card"><h2>PnL Summary</h2><div id="pnl-body"><div class="muted-block">Loading…</div></div></div>`;
+  try {
+    const r = await api("/api/analytics/pnl");
+    const rows = r.bots || [];
+    if (!rows.length) { document.getElementById("pnl-body").innerHTML = `<div class="muted-block">No state yet — run a cycle first.</div>`; return; }
+    const trs = rows.map(p => {
+      const total = (p.cash_pnl || 0) + (p.realized_pnl || 0);
+      const cls = total >= 0 ? "good" : "bad";
+      return `<tr>
+        <td><b>${esc(p.bot)}</b></td>
+        <td>${p.cycles} (live=${p.live_cycles}/dry=${p.dry_run_cycles})</td>
+        <td>${p.posts_live} (${fmt$(p.posted_notional_live)})</td>
+        <td>${p.posts_dry} (${fmt$(p.posted_notional_dry)})</td>
+        <td>${p.open_positions}</td>
+        <td>${fmt$(p.cash_pnl)}</td>
+        <td>${fmt$(p.realized_pnl)}</td>
+        <td class="${cls}"><b>${fmt$(total)}</b></td>
+      </tr>`;
+    }).join("");
+    document.getElementById("pnl-body").innerHTML = `
+      <table>
+        <thead><tr><th>Bot</th><th>Cycles</th><th>Live posts</th><th>Dry posts</th><th>Open pos</th><th>Cash PnL</th><th>Realized</th><th>Total</th></tr></thead>
+        <tbody>${trs}</tbody>
+      </table>
+      <div class="dim" style="margin-top:10px;font-size:12px;">
+        Cash PnL = unrealized on open positions. Realized = closed positions. Dry-run posts are hypothetical and not in totals.
+      </div>
+    `;
+  } catch (e) { document.getElementById("pnl-body").innerHTML = `<div class="bad">${esc(e.message)}</div>`; }
+}
+
+// ---------- Settings ----------
+
+function renderSettings() {
+  const g = STATE.globals;
+  $("content").innerHTML = `
+    <div class="card">
+      <h2>Runtime settings</h2>
+      <div class="dim" style="margin-bottom:14px;">
+        Changes apply immediately to the running process. They do <b>not</b> write to <span class="mono">config.yaml</span> —
+        edit the file directly to persist across restarts.
+      </div>
+      <div class="row" style="gap:24px;flex-wrap:wrap;align-items:flex-start;">
+        <div>
+          <h2>Mode</h2>
+          <div style="margin-bottom:8px;">
+            ${g.dry_run
+              ? '<span class="badge dry">DRY RUN — no orders sent</span>'
+              : '<span class="badge live">LIVE — real orders going through</span>'}
+          </div>
+          <button class="btn ${g.dry_run ? 'primary' : 'danger'}" onclick="toggleDryRun()">
+            ${g.dry_run ? 'Switch to LIVE (real money)' : 'Switch to DRY RUN'}
+          </button>
+        </div>
+        <div>
+          <h2>Bet size (per market)</h2>
+          <div class="row" style="gap:8px;">
+            <input id="set-bet-size" type="number" min="1" max="1000" step="1" value="${g.bet_size_usdc}" style="width:96px;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;"/>
+            <button class="btn" onclick="updateBetSize()">Save</button>
+          </div>
+          <div class="dim" style="font-size:11px;margin-top:6px;">Recommended starting range: $5–25</div>
+        </div>
+        <div>
+          <h2>Max open notional (cycle cap)</h2>
+          <div class="row" style="gap:8px;">
+            <input id="set-cap" type="number" min="10" max="100000" step="10" value="${g.max_open_notional_usdc}" style="width:120px;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;"/>
+            <button class="btn" onclick="updateCap()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px;">
+      <h2>Current globals (read-only)</h2>
+      <pre>${esc(JSON.stringify(g, null, 2))}</pre>
+    </div>
+  `;
+}
+
+async function toggleDryRun() {
+  const newVal = !STATE.globals.dry_run;
+  if (!newVal) {
+    if (!confirm("Switch to LIVE mode? The bot will start sending REAL orders with REAL money on the next cycle. Continue?")) return;
+  }
+  try {
+    await api("/api/settings", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({dry_run: newVal}) });
+    await loadAll();
+  } catch (e) { alert(e.message); }
+}
+
+async function updateBetSize() {
+  const v = Number(document.getElementById("set-bet-size").value);
+  if (!(v > 0)) { alert("invalid size"); return; }
+  try {
+    await api("/api/settings", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({bet_size_usdc: v}) });
+    await loadAll();
+  } catch (e) { alert(e.message); }
+}
+
+async function updateCap() {
+  const v = Number(document.getElementById("set-cap").value);
+  if (!(v > 0)) { alert("invalid cap"); return; }
+  try {
+    await api("/api/settings", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({max_open_notional_usdc: v}) });
+    await loadAll();
+  } catch (e) { alert(e.message); }
 }
 
 loadAll();
