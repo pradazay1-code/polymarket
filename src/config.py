@@ -44,6 +44,7 @@ class BotConfig:
     espn_league: str | None
     polymarket_tag: str
     account: str
+    strategy: str = "stink_bid"  # one of: stink_bid, climate_forecast
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -98,7 +99,8 @@ def load(path: str | Path = "config.yaml") -> AppConfig:
             espn_league=b.get("espn_league"),
             polymarket_tag=b["polymarket_tag"],
             account=b.get("account", "primary"),
-            extra={k: v for k, v in b.items() if k not in {"enabled", "description", "sport", "espn_league", "polymarket_tag", "account"}},
+            strategy=b.get("strategy", "stink_bid"),
+            extra={k: v for k, v in b.items() if k not in {"enabled", "description", "sport", "espn_league", "polymarket_tag", "account", "strategy"}},
         )
     return AppConfig(
         globals=globals_,

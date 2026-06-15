@@ -10,9 +10,19 @@ from ..client import PolymarketClient
 from ..config import AppConfig, BotConfig
 from ..markets import fetch_markets
 from ..state import CycleSnapshot, now_iso, write_snapshot
+from ..strategies.climate_forecast import ClimateForecastStrategy
 from ..strategies.stink_bid import StinkBidStrategy
 
 log = logging.getLogger(__name__)
+
+
+def _build_strategy(bot: BotConfig, client, cfg):
+    name = bot.strategy
+    if name == "stink_bid":
+        return StinkBidStrategy(client, cfg, label=bot.name)
+    if name == "climate_forecast":
+        return ClimateForecastStrategy(client, cfg, label=bot.name, extra=bot.extra)
+    raise ValueError(f"unknown strategy '{name}' for bot '{bot.name}'")
 
 
 class BotRunner:
@@ -26,7 +36,7 @@ class BotRunner:
                 f"PRIVATE_KEY/FUNDER_ADDRESS pair was found in .env"
             )
         self.client = PolymarketClient(account=account, host=app.clob_host, chain_id=app.chain_id)
-        self.strategy = StinkBidStrategy(self.client, app.globals, label=bot.name)
+        self.strategy = _build_strategy(bot, self.client, app.globals)
         self._stop = threading.Event()
 
     def _shutdown(self, *_):

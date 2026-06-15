@@ -52,3 +52,16 @@ bots:
     espn_league: mlb
     polymarket_tag: mlb
     account: primary
+
+  climate:
+    enabled: true
+    description: "Climate / weather markets — bets on NOAA forecast vs market price."
+    sport: weather
+    espn_league: null
+    polymarket_tag: climate
+    account: primary
+    strategy: climate_forecast
+    # Strategy-specific knobs (read by ClimateForecastStrategy).
+    min_edge: 0.05         # require >=5% probability gap between model and market
+    max_days_out: 7        # forecast accuracy collapses past a week
+    bid_discount: 0.03     # post limit 3% below current market price

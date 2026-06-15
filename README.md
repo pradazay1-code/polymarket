@@ -85,6 +85,33 @@ config.yaml            # Bot definitions and global risk knobs
 - **Positions tab**: every YES/NO holding, with cost basis and live PnL.
 - Auto-refresh every 15 seconds.
 
+## Climate / weather strategy
+
+A second strategy targets Polymarket's climate markets ("Will [city]'s high
+be above X°F on [date]?") using free NOAA forecast data.
+
+```bash
+python main.py markets climate           # preview Polymarket climate markets
+python main.py run climate --once        # dry cycle: forecast vs market price
+```
+
+How it decides:
+1. Parse the question for (city, threshold °F, target date).
+2. Pull the NWS daily forecast for that location.
+3. Compute model P(high > threshold) using a normal CDF with sigma
+   sized to days-out (NWS hits ~2°F RMSE 1 day out, ~6°F at a week).
+4. If model probability disagrees with the market price by more than
+   `min_edge` (default 5%), post a small limit on the underpriced side.
+
+Config knobs (under `bots.climate` in `config.yaml`):
+- `min_edge`: minimum probability gap to bet (default 0.05)
+- `max_days_out`: refuse bets > N days out (default 7 — forecasts get noisy)
+- `bid_discount`: how far below market to post the limit (default 0.03)
+
+Honest scope: the parser handles common US-city daily-high questions.
+Long-horizon ("hottest year on record") and non-temperature climate
+markets are skipped. Markets are small so keep `bet_size_usdc` tiny.
+
 ## Multi-account
 
 Add `PRIVATE_KEY_2`/`FUNDER_ADDRESS_2`/`SIGNATURE_TYPE_2` (and `_3`, `_4`) in
