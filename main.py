@@ -87,7 +87,11 @@ def cmd_dashboard(app: cfg_mod.AppConfig, args) -> int:  # noqa: ARG001
     except ImportError:
         print("uvicorn not installed. `pip install -r requirements.txt`")
         return 1
-    print(f"Dashboard: http://{args.host}:{args.port}")
+    print(f"Dashboard binding {args.host}:{args.port}")
+    if args.host in ("0.0.0.0", "::"):
+        print(f"  Open in browser: http://localhost:{args.port}  (or http://penguin.linux.test:{args.port} on Chromebook)")
+    else:
+        print(f"  Open in browser: http://{args.host}:{args.port}")
     uvicorn.run("src.api:app", host=args.host, port=args.port, log_level="info")
     return 0
 
@@ -251,7 +255,9 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--live", action="store_true", help="override dry_run=true in config")
 
     p_dash = sub.add_parser("dashboard", help="serve the web dashboard")
-    p_dash.add_argument("--host", default="127.0.0.1")
+    # Default 0.0.0.0 so Chromebook Linux / VPS users can reach it from a
+    # browser. Override with --host 127.0.0.1 to keep it container-only.
+    p_dash.add_argument("--host", default="0.0.0.0")
     p_dash.add_argument("--port", type=int, default=8787)
 
     p_bt = sub.add_parser("backtest", help="replay history through the strategy")
